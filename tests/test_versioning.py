@@ -1,13 +1,12 @@
 """Versioning, optimistic concurrency, old-query protection, reclamation."""
 import os
-import sqlite3
 import threading
 import time
 
 import pysam
 from conftest import SAMPLE, make_config, upload, vcf
 
-from app.db import Conflict, Store
+from app.db import StateChanged, Store
 from app.main import create_app
 from app.vcfbuild import GZ_NAME
 
@@ -19,7 +18,11 @@ def _version_dir(app, version_path):
 def test_concurrent_publish_only_one_wins(tmp_path):
     """Two writers racing with the same base_version: exactly one succeeds."""
     store = Store(os.path.join(str(tmp_path), "meta.sqlite3"))
-    store.publish(0, "chr1", "versions/v1", 10)
+    now = time.time()
+    ref_id = store.activate_reference(
+        "chr1", "sha", 1000, "refs/r0", 0, "test", expected_version=0, now=now
+    )
+    store.publish_vcf(0, ref_id, "chr1", "versions/v1", 10, now)
 
     results = {"ok": 0, "conflict": 0}
     lock = threading.Lock()
@@ -28,10 +31,10 @@ def test_concurrent_publish_only_one_wins(tmp_path):
     def race(i):
         barrier.wait()
         try:
-            store.publish(1, "chr1", f"versions/racer{i}", 1)
+            store.publish_vcf(1, ref_id, "chr1", f"versions/racer{i}", 1)
             with lock:
                 results["ok"] += 1
-        except Conflict:
+        except StateChanged:
             with lock:
                 results["conflict"] += 1
 
@@ -53,7 +56,7 @@ def test_old_query_reads_old_version_then_files_reclaimed(client, app):
     # simulate an in-flight query on version 1
     pinned = store.pin("test-inst")
     assert pinned[0] == 1
-    ref_id = pinned[3]
+    pin_id = pinned[3]
 
     # replacement gets published while the old query is still open
     r = upload(client, vcf([(500, "A", "G")]), base_version=1)
@@ -77,7 +80,7 @@ def test_old_query_reads_old_version_then_files_reclaimed(client, app):
     assert [rec.split("\t")[1] for rec in q.json()["records"]] == ["500"]
 
     # old query finishes -> reaper removes version 1 files and row
-    store.unpin(ref_id)
+    store.unpin(pin_id)
     app.state.reap_once()
     assert not os.path.exists(_version_dir(app, v1_path))
     assert store.current_version() == 2

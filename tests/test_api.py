@@ -9,12 +9,15 @@ from app.vcfbuild import GZ_NAME, TBI_NAME
 def test_upload_then_query_flow(client):
     r = upload(client, SAMPLE, base_version=0)
     assert r.status_code == 201, r.text
-    assert r.json() == {"version": 1, "chrom": "chr1", "n_records": 4}
+    body = r.json()
+    assert body["version"] == 1 and body["chrom"] == "chr1" and body["n_records"] == 4
+    assert body["ref_id"] >= 1
 
     q = client.get("/variants", params={"chrom": "chr1", "start": 105, "end": 105})
     assert q.status_code == 200
     body = q.json()
     assert body["version"] == 1
+    assert body["ref_id"] == r.json()["ref_id"]
     assert body["count"] == 1
     assert body["records"][0].split("\t")[1] == "105"
 
@@ -84,10 +87,13 @@ def test_query_without_data_is_404(client):
 
 
 def test_version_endpoint(client):
-    assert client.get("/version").json() == {"published": False, "current_version": 0}
+    assert client.get("/version").json() == {
+        "published": False, "current_version": 0, "ref_id": 0
+    }
     upload(client, SAMPLE, base_version=0)
     body = client.get("/version").json()
     assert body["published"] is True
     assert body["current_version"] == 1
+    assert body["ref_id"] >= 1
     assert body["chrom"] == "chr1"
     assert body["n_records"] == 4
